@@ -1,7 +1,6 @@
-
 turtles-own
 [
-  fertility
+  energy
 ]
 
 patches-own
@@ -14,10 +13,22 @@ to setup
   clear-all
   ;; creating the bugs the following way ensures that we won't
   ;; wind up with more than one bug on a patch
-  ask n-of cell-count patches [
+  ask n-of carrying-capacity patches [
     sprout 1 [
-      set fertility 1
+      set energy 10
       set color green
+      if not mutation-occurs
+      [
+        ifelse random 100 < (prob-gfy-mutation * prob-gfp-mutation) / 100
+        [
+          set color red
+        ]
+        [
+          if random 100 < prob-gfy-mutation [set color yellow]
+          if random 100 < prob-gfp-mutation [set color pink]
+        ]
+      ]
+
       face one-of neighbors
       set size 2  ;; easier to see
     ]
@@ -44,36 +55,81 @@ to go
   ;; each time.
   ask turtles [
     produce_gf
+    get_energy
     reproduce
   ]
+  diffuse gfy diffusion-rate
+  diffuse gfp diffusion-rate
 
   kill-turtles
-  ;; recolor-turtles
   recolor-patches
   tick
 end
 
 to produce_gf
+  let actual-output-gfy output-gfy
+  let actual-output-gfp output-gfp
+
   ;; TODO: currently gf is outputted on currently occupied patch. Should maybe output gf in area surrounding to promote sharing
   if color = red [
-    set gfy gfy + output-gfy
-    set gfp gfp + output-gfp
+    ifelse red-produces-gf
+    [
+      if energy < output-gfp + output-gfy [
+        set actual-output-gfy round (actual-output-gfy / (actual-output-gfy + actual-output-gfp)) * energy
+        set actual-output-gfp energy - actual-output-gfy
+      ]
+    ]
+    [
+      set actual-output-gfp 0
+      set actual-output-gfy 0
+    ]
   ]
   if color = yellow [
-    set gfy gfy + output-gfy
+    if energy < output-gfy [set actual-output-gfy energy]  ;; makes sure that cell is not producing more gf than energy allows
+    set actual-output-gfp 0
   ]
   if color = pink [
-    set gfp gfp + output-gfp
+    if energy < output-gfp [set actual-output-gfp energy]  ;; makes sure that cell is not producing more gf than energy allows
+    set actual-output-gfy 0
   ]
+  if color = green [
+    set actual-output-gfp 0
+    set actual-output-gfy 0
+  ]
+
+  set gfy gfy + actual-output-gfy
+  set gfp gfp + actual-output-gfp
+  set energy energy - actual-output-gfy - actual-output-gfp
+
 end
 
-;; TODO: max figure this out
+to get_energy
+  if color = yellow [
+    set energy energy + gfp * gf-energy-multiplier  ;; TODO: confirm that gfp is only the gfp of the patch the turtle is on
+    set gfp 0
+  ]
+  if color = pink [
+    set energy energy + gfy * gf-energy-multiplier
+    set gfy 0
+  ]
+  if color = red [
+    set energy energy + (gfp + gfy) * gf-energy-multiplier
+    set gfp 0
+    set gfy 0
+  ]
+
+  set energy energy + energy-to-all-turtles-per-tick
+  ;; TODO: add energy for green
+end
+
 to recolor-patches
-  ;; hotter patches will be red verging on white;
-  ;; cooler patches will be black
-  ask patches [ set pcolor scale-color red gfy 0 150 ]
-end
+  ;; more gfy = red (255 0 0)
+  ;; more gfp = blue (0 0 255)
+  ;; both = magenta (255 0 255)
+  ;; 1.7 is the correct magic number for scaling, I think
 
+  ask patches [ set pcolor (list (min (list (gfy * 1.7) 255)) 0 (min (list (gfp * 1.7) 255))) ]
+end
 
 to find-empty-patch-or-die
   let target one-of neighbors with [not any? turtles-here]
@@ -81,29 +137,24 @@ to find-empty-patch-or-die
 end
 
 to reproduce ;; each turtle reproduces according to its fitness and then dies
-  ;; If cell is cancerous, then it requires GF in order to reproduce
-  if color != green[
-    ifelse gfy >= gf-reproduction-threshold and gfp >= gf-reproduction-threshold
-    [
-      set gfy gfy - gf-reproduction-threshold
-      set gfp gfp - gf-reproduction-threshold
-    ]
-    [stop]  ;; cell cannot reproduce without sufficient GF
-  ]
+  let fertility floor energy / reproduction-energy
+  set energy energy - fertility * reproduction-energy
+
   hatch fertility [
     ;; Randomly mutate all non-cells.
     ;; TODO: figure out whether cancerous cells can mutate and stop double counting mutation rate.
-
-    if random 100 < prob-gfy-mutation [
-      if color = green [set color yellow]
-      if color = pink [set color red]
+    if mutation-occurs [
+      if random 100 < prob-gfy-mutation [
+        if color = green [set color yellow]
+        if color = pink [set color red]
+      ]
+      if random 100 < prob-gfp-mutation [
+        if color = green [set color pink]
+        if color = yellow [set color red]
+      ]
     ]
-    if random 100 < prob-gfp-mutation [
-      if color = green [set color pink]
-      if color = yellow [set color red]
-    ]
 
-    set fertility 1  ;; TODO: make cancer cells have higher fertility than normal cells
+    set energy 1  ;; TODO: make cancer cells have higher energy than normal cells
 
     ;; move offspring to an adjacent empty patch. If no empty patches exist, offspring dies.
     find-empty-patch-or-die
@@ -113,65 +164,12 @@ end
 ;; kill turtles in excess of carrying capacity
 ;; note that reds, yellows, and pinks have equal probability of dying
 to kill-turtles
-  ask turtles [
-    if color != green and random 100 < 100 * cancer-death-rate [die]
-    if color = green and random 100 < 100 * normal-death-rate [die]
-  ]
-
   ;; Kill remaining turtles based on carrying-capacity
   let num-turtles count turtles
   if num-turtles > carrying-capacity [
     let num-to-die num-turtles - carrying-capacity
     ask n-of num-to-die turtles [ die ]
   ]
-end
-
-to-report best-patch  ;; turtle procedure
-  ifelse gfy < gf-reproduction-threshold  ;; TODO: currently only looking at current patch. Also should look at patch next to me
-    [ let winner max-one-of neighbors [gfy]
-      ifelse [gfy] of winner > gfy
-        [ report winner ]
-        [ report patch-here ] ]
-    [ let winner min-one-of neighbors [gfy]
-      ifelse [gfy] of winner < gfy
-        [ report winner ]
-        [ report patch-here ] ]
-end
-
-to bug-move [target]  ;; turtle procedure
-  ;; if we're already there, there's nothing to do
-  if target = patch-here [ stop ]
-  ;; move to the target patch (if it is not already occupied)
-  if not any? turtles-on target [
-    face target
-    move-to target
-    stop
-  ]
-  set target one-of neighbors with [not any? turtles-here]
-  if target != nobody [ move-to target ]
-  ;; The code above is a bit different from the original Heatbugs
-  ;; model in Swarm.  In the NetLogo version, the bug will always
-  ;; find an empty patch if one is available.
-  ;; In the Swarm version, the bug picks a random
-  ;; nearby patch, checks to see if it is occupied, and if it is,
-  ;; picks again.  If after 10 tries it hasn't found an empty
-  ;; patch, it gives up and stays where it is.  Since each try
-  ;; is random and independent, even if there is an available
-  ;; empty patch the bug will not always find it.  Presumably
-  ;; the Swarm version is coded that way because there is no
-  ;; concise equivalent in Swarm/Objective C to NetLogo's
-  ;; 'one-of neighbors with [not any? turtles-here]'.
-  ;; If you want to match the Swarm version exactly, remove the
-  ;; last two lines of code above and replace them with this:
-  ; let tries 0
-  ; while [tries <= 9]
-  ;   [ set tries tries + 1
-  ;     set target one-of neighbors
-  ;     if not any? turtles-on target [
-  ;       move-to target
-  ;       stop
-  ;     ]
-  ;   ]
 end
 
 ;;; the following procedures support the two extra buttons
@@ -218,26 +216,11 @@ GRAPHICS-WINDOW
 ticks
 30.0
 
-SLIDER
-14
-30
-276
-63
-cell-count
-cell-count
-1
-500
-21.0
-1
-1
-cells
-HORIZONTAL
-
 BUTTON
-27
-177
-96
-210
+22
+186
+91
+219
 NIL
 setup
 NIL
@@ -251,10 +234,10 @@ NIL
 1
 
 BUTTON
-98
-177
-166
-210
+93
+186
+161
+219
 NIL
 go
 T
@@ -268,174 +251,115 @@ NIL
 0
 
 SLIDER
-164
-236
-357
-269
+177
+171
+370
+204
 evaporation-rate
 evaporation-rate
 0
-1
-0.01
-0.01
+0.02
+0.0
+0.001
 1
 NIL
 HORIZONTAL
 
 SLIDER
-164
-270
-357
-303
+177
+205
+370
+238
 diffusion-rate
 diffusion-rate
 0
 1
-0.6
+1.0
 0.1
 1
 NIL
 HORIZONTAL
 
 SLIDER
-189
-102
-362
-135
+199
+112
+372
+145
 output-gfp
 output-gfp
 0
 100
-11.0
+60.0
 1
 1
 NIL
 HORIZONTAL
 
 SLIDER
-189
+200
 69
-362
+373
 102
 output-gfy
 output-gfy
 0
 100
-9.0
+60.0
 1
 1
 NIL
 HORIZONTAL
 
-BUTTON
-232
-145
-343
-178
-NIL
-gfy-nowhere
-NIL
-1
-T
-OBSERVER
-NIL
-NIL
-NIL
-NIL
-1
-
-BUTTON
-232
-178
-360
-211
-NIL
-gfy-everywhere
-NIL
-1
-T
-OBSERVER
-NIL
-NIL
-NIL
-NIL
-1
-
 TEXTBOX
-10
-10
-160
-28
-Initial settings for cells
-11
-0.0
-0
-
-TEXTBOX
-13
-230
-140
-258
+8
+239
+135
+267
 Other parameters
 11
 0.0
 0
 
 TEXTBOX
-12
-156
-162
-174
+7
+165
+157
+183
 Actions
 11
 0.0
 0
 
 TEXTBOX
-12
-251
-153
-280
+7
+260
+148
+289
 (OK to change\nduring run)
 11
 0.0
 0
 
 SLIDER
-625
-434
-797
-467
+105
+30
+284
+63
 carrying-capacity
 carrying-capacity
-100
 1000
-250.0
+8000
+8000.0
 50
-1
-NIL
-HORIZONTAL
-
-SLIDER
-388
-577
-609
-610
-gf-reproduction-threshold
-gf-reproduction-threshold
-0
-200
-6.0
-1
 1
 NIL
 HORIZONTAL
 
 PLOT
 11
-348
+312
 370
-537
+501
 Cell Types
 Time
 Cell Types
@@ -453,64 +377,111 @@ PENS
 "pen-3" 1.0 0 -1184463 true "" "plot count turtles with [color = yellow]"
 
 SLIDER
-626
-503
-798
+10
+67
+182
+100
+prob-gfy-mutation
+prob-gfy-mutation
+0
+100
+1.0
+1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+10
+111
+183
+144
+prob-gfp-mutation
+prob-gfp-mutation
+0
+100
+1.0
+1
+1
+NIL
+HORIZONTAL
+
+SWITCH
+382
+432
+544
+465
+mutation-occurs
+mutation-occurs
+0
+1
+-1000
+
+SLIDER
+374
+537
+559
+570
+reproduction-energy
+reproduction-energy
+0
+10
+2.0
+1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+583
 536
-cancer-death-rate
-cancer-death-rate
+793
+569
+gf-energy-multiplier
+gf-energy-multiplier
 0
+5
+4.0
 1
-0.35
-0.01
 1
 NIL
 HORIZONTAL
 
 SLIDER
-624
-468
-796
-501
-normal-death-rate
-normal-death-rate
+459
+496
+691
+529
+energy-to-all-turtles-per-tick
+energy-to-all-turtles-per-tick
 0
+10
+1.0
 1
-0.2
-0.01
 1
 NIL
 HORIZONTAL
 
-SLIDER
-389
+SWITCH
+605
 433
-561
+768
 466
-prob-gfy-mutation
-prob-gfy-mutation
-0
-100
-15.0
+red-produces-gf
+red-produces-gf
 1
 1
-NIL
-HORIZONTAL
+-1000
 
-SLIDER
-389
-477
-562
-510
-prob-gfp-mutation
-prob-gfp-mutation
+TEXTBOX
+376
+476
+526
+494
+Energy\n
+11
+0.0
 0
-100
-15.0
-1
-1
-NIL
-HORIZONTAL
 
 @#$#@#$#@
 ## WHAT IS IT?
@@ -520,6 +491,28 @@ HORIZONTAL
 
 
 ## HOW TO USE IT
+
+## Some good defaults:
+* cell-count = 1000
+* output-gfy = 60
+* output-gfp = 60
+* evaporation-rate = 0
+* diffusion-rate = 1
+* prob-gfy-mutation = 15
+* prob-gfp-mutation = 15
+* mutation-occurs = Off (means that mutation does not happen every time cell reproduces)
+* gf-energy-multiplier = 4 (means that consuming 1 gf results in 4 energy)
+* energy-to-all-turtles-per-tick =- 1
+* reproduction-energy = 2 (means that 2 energy is required to reproduce a single offspring)
+* carrying-capacity = 8000
+* red-produces-gf = Off (means that red cancer cells can consume both kinds of gf but do not produce)
+
+### What you will see
+Groups of yellow and pink cells cluster together. Red cells surround them.
+
+### Things to try
+* decrease carrying capacity
+* allow red to produce gf 
 
 
 ## RELATED MODELS
@@ -840,7 +833,7 @@ false
 Polygon -7500403 true true 270 75 225 30 30 225 75 270
 Polygon -7500403 true true 30 75 75 30 270 225 225 270
 @#$#@#$#@
-NetLogo 6.2.0
+NetLogo 6.2.1
 @#$#@#$#@
 @#$#@#$#@
 @#$#@#$#@
